@@ -1,0 +1,82 @@
+"""
+conda create -n snowpark_env python=3.12
+conda activate snowpark_env
+pip install snowflake-snowpark-python
+"""
+
+
+from snowflake.snowpark import Session
+from snowflake.snowpark.functions import col, lit
+
+snowflake_connector = {
+"account" : "EMEEWPU-VG15666", --acount_name
+"user" : "", --user_name
+"password" : "",--password
+"role": "ACCOUNTADMIN",
+"warehouse": "COMPUTE_WH",
+"database" : "SNOWFLAKE_LEARNING_DB",
+"schema" : "BRONZE"
+}
+
+session = Session.builder.configs(snowflake_connector).create()
+
+print(session)
+
+print(session.sql("select current_warehouse(), current_database(), current_schema() ").collect())
+
+dir_df = (session.sql("SELECT RELATIVE_PATH FROM DIRECTORY(@DYNAMICLOAD)").collect())
+print(dir_df)
+
+
+
+for file in dir_df:
+    file_path = file['RELATIVE_PATH']
+    parts = file_path.split('/')
+    print(parts)
+    folder_name, file_name = parts
+    print(folder_name, file_name)
+    tablename = folder_name.upper()
+    full_stage_path = f"@DYNAMICLOAD/{file_path}"
+    print(full_stage_path)
+    if session.table("FILE_LOAD_LOG").filter(col("FILE_NAME") == lit(file_path)).count() > 0:
+                print(session.table("FILE_LOAD_LOG").filter(col("FILE_NAME") == lit(file_path)).count())
+                continue
+    
+    # Check if table exists
+    check_sql = f"""
+    SELECT COUNT(*) 
+    FROM INFORMATION_SCHEMA.TABLES 
+    WHERE TABLE_SCHEMA = CURRENT_SCHEMA() 
+    AND TABLE_NAME = '{tablename}'
+    """
+    print(check_sql)
+    table_exists = session.sql(check_sql).collect()[0][0]
+    print(table_exists)
+
+    if table_exists == 0:
+        create_sql = f"""
+            CREATE OR REPLACE TABLE IDENTIFIER('{tablename}')
+            USING TEMPLATE (
+                SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*))
+                FROM TABLE(
+                    INFER_SCHEMA(
+                        LOCATION => '{full_stage_path}',
+                        FILE_FORMAT => 'my_csv_format',
+                        IGNORE_CASE => TRUE
+                    )
+                )
+            )
+        """
+        session.sql(create_sql).collect()
+
+    # Load the data
+    copy_sql = f"""
+        COPY INTO IDENTIFIER('{tablename}')
+        FROM '{full_stage_path}'
+        FILE_FORMAT = (FORMAT_NAME = 'my_csv_format')
+        MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
+        ON_ERROR = 'SKIP_FILE'
+    """
+    session.sql(copy_sql).collect()
+
+    session.sql(f"INSERT INTO FILE_LOAD_LOG (FILE_NAME) VALUES ('{file_path}')").collect()
